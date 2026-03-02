@@ -1,55 +1,37 @@
 import { existsSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { loadWorkspaceConfig, type LoadedWorkspaceConfig } from "../config/workspace-config.js";
 
 /**
- * Walk up the directory tree from `start` until a `pnpm-workspace.yaml` is
- * found, returning that directory as the codeprism monorepo root.
+ * Find the workspace root for the CLI.
  *
- * @throws if no `pnpm-workspace.yaml` is found before reaching the filesystem root
+ * Resolution order:
+ * 1. Walk up from process.cwd() looking for `codeprism.config.json`
+ * 2. Fall back to process.cwd() (autoDiscover will handle single-repo or multi-repo layouts)
+ *
+ * The `importMetaUrl` parameter is kept for API compatibility but is no longer used.
  */
-export function findCodeprismRoot(start: string): string {
-  let dir = start;
+export function userWorkspaceRootFrom(_importMetaUrl: string): string {
+  const cwd = process.cwd();
+
+  // Walk up looking for an explicit config file
+  let dir = cwd;
   while (true) {
-    if (existsSync(join(dir, "pnpm-workspace.yaml"))) return dir;
+    if (existsSync(join(dir, "codeprism.config.json"))) return dir;
     const parent = resolve(dir, "..");
-    if (parent === dir) {
-      throw new Error(
-        `Could not find codeprism root — no pnpm-workspace.yaml found above "${start}"`,
-      );
-    }
+    if (parent === dir) break;
     dir = parent;
   }
+
+  // No config found — treat cwd as workspace root.
+  // autoDiscover will detect whether cwd is itself a repo or a parent of repos.
+  return cwd;
 }
 
 /**
- * Find the user's workspace root — the directory that contains the repos
- * being indexed. By convention this is the parent of the codeprism installation
- * directory (i.e. one level above the pnpm-workspace.yaml).
- *
- * Using `import.meta.url` as the anchor makes this independent of
- * `process.cwd()`, so the result is the same regardless of which directory
- * the caller runs the script from.
- *
- * Usage (in any CLI script):
- *   import { userWorkspaceRootFrom } from "../utils/workspace.js";
- *   const WORKSPACE_ROOT = userWorkspaceRootFrom(import.meta.url);
+ * Load the full workspace configuration from process.cwd().
  */
-export function userWorkspaceRootFrom(importMetaUrl: string): string {
-  const scriptDir = fileURLToPath(new URL(".", importMetaUrl));
-  const codeprismRoot = findCodeprismRoot(scriptDir);
-  return resolve(codeprismRoot, "..");
-}
-
-/**
- * Load the full workspace configuration, checking for `codeprism.config.json`
- * at the workspace root first and falling back to auto-discovery.
- *
- * This is the recommended entry point for CLI scripts that need both the
- * workspace root and the list of repos.
- */
-export function loadWorkspace(importMetaUrl: string): LoadedWorkspaceConfig {
-  const workspaceRoot = userWorkspaceRootFrom(importMetaUrl);
+export function loadWorkspace(_importMetaUrl: string): LoadedWorkspaceConfig {
+  const workspaceRoot = userWorkspaceRootFrom(_importMetaUrl);
   return loadWorkspaceConfig(workspaceRoot);
 }

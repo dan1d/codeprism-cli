@@ -152,10 +152,27 @@ function resolveExclude(cfg: Record<string, unknown>): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Scans `workspaceRoot` for sibling directories that look like repos.
- * Skips hidden directories and the `codeprism` directory itself.
+ * Auto-discover repos.
+ *
+ * - If the workspace root itself looks like a repo (has package.json, .git, etc.)
+ *   treat it as a single-repo workspace. This is the common case when a developer
+ *   runs `codeprism index` from inside their project.
+ *
+ * - Otherwise scan child directories for repos (multi-repo workspace layout).
  */
 function autoDiscover(workspaceRoot: string): LoadedWorkspaceConfig {
+  // Single-repo case: cwd IS the repo
+  if (REPO_MARKERS.some((marker) => existsSync(join(workspaceRoot, marker)))) {
+    const name = workspaceRoot.split("/").at(-1) ?? "repo";
+    return {
+      workspaceRoot,
+      repos: [{ name, path: workspaceRoot }],
+      exclude: [],
+      source: "auto",
+    };
+  }
+
+  // Multi-repo case: scan child directories
   const entries = readdirSync(workspaceRoot, { withFileTypes: true });
   const repos: ResolvedRepo[] = entries
     .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "codeprism")
