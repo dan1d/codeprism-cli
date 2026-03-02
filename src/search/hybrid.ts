@@ -1,0 +1,441 @@
+import type { Card } from "../db/schema.js";
+import { getDb } from "../db/connection.js";
+import { getEmbedder } from "../embeddings/local-embedder.js";
+import { semanticSearch } from "./semantic.js";
+import { keywordSearch } from "./keyword.js";
+import { classifyQueryEmbedding } from "./query-classifier.js";
+import { loadRepoSignals } from "./repo-signals.js";
+import { hydeEmbed } from "./hyde.js";
+import { expandQuery } from "./query-expander.js";
+
+export interface SearchResult {
+  card: Card;
+  score: number;
+  source: "semantic" | "keyword" | "both";
+}
+
+const CACHE_SIMILARITY_THRESHOLD = 0.92;
+const CACHE_LOOKUP_LIMIT = 50;
+
+/**
+ * Checks the metrics table for a recent query whose embedding has cosine
+ * similarity > 0.92 with the current query. If found, returns the same
+ * cards that were served for that query (a semantic cache hit).
+ */
+export async function checkCache(
+  query: string,
+): Promise<SearchResult[] | null> {
+  const embedding = await getEmbedder().embed(query, "query");
+  const db = getDb();
+
+  const recentMetrics = db
+    .prepare(
+      "SELECT query_embedding, response_cards FROM metrics WHERE query_embedding IS NOT NULL ORDER BY timestamp DESC LIMIT ?",
+    )
+    .all(CACHE_LOOKUP_LIMIT) as {
+    query_embedding: Buffer;
+    response_cards: string;
+  }[];
+
+  for (const metric of recentMetrics) {
+    const buf = metric.query_embedding;
+    const stored = new Float32Array(
+      buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength),
+    );
+
+    if (stored.length !== embedding.length) continue;
+
+    let dot = 0;
+    for (let i = 0; i < embedding.length; i++) {
+      dot += embedding[i]! * stored[i]!;
+    }
+
+    if (dot > CACHE_SIMILARITY_THRESHOLD) {
+      const cardIds: string[] = JSON.parse(metric.response_cards);
+      if (cardIds.length === 0) return [];
+
+      const placeholders = cardIds.map(() => "?").join(", ");
+      const cards = db
+        .prepare(`SELECT * FROM cards WHERE id IN (${placeholders})`)
+        .all(...cardIds) as Card[];
+
+      return cards.map((card) => ({
+        card,
+        score: 1,
+        source: "both" as const,
+      }));
+    }
+  }
+
+  return null;
+}
+
+const TYPE_BOOST: Record<string, number> = {
+  model: 1.0,
+  flow: 1.0,
+  cross_service: 0.95,
+  hub: 0.4,
+  dev_insight: 1.1,
+  // RAPTOR cluster summaries surface for vague/cross-cutting queries;
+  // 0.85x keeps them below specific cards when specifics are available.
+  raptor_cluster: 0.85,
+  // Behavioral cards from the page indexer — contain filter/interaction vocabulary.
+  // Pages and endpoints are boosted slightly because they're highly specific:
+  // one page/controller per card means the match is very targeted.
+  // Components are neutral — they're shared so less likely to be the primary target.
+  page: 1.1,
+  endpoint: 1.05,
+  component: 0.95,
+  service: 1.05,
+};
+
+/**
+ * Reciprocal Rank Fusion score across multiple retrieval lists.
+ * Standard RRF formula: Σ 1/(k + rank_i), k=60 per Cormack et al. (2009).
+ * A card appearing in two lists at rank 0 scores ~0.033 (vs 0.016 for one).
+ */
+export function computeRrfScore(ranks: number[], k = 60): number {
+  return ranks.reduce((sum, rank) => sum + 1 / (k + rank), 0);
+}
+
+/**
+ * Score-weighted RRF: blends the standard rank-based RRF with normalized raw
+ * scores (cosine similarity for semantic, normalized BM25 for keyword).
+ *
+ * Pure RRF ignores that rank-0 distance=0.05 is a much stronger match than
+ * rank-0 distance=0.40. This blend adds a small score-proportional bonus
+ * (weight=0.25) on top of the rank signal (weight=0.75), preserving the
+ * rank ordering while rewarding strong confidence matches.
+ *
+ * @param ranks - 0-based rank positions from each retrieval list
+ * @param normalizedScores - scores in [0,1] where 1 = best (cosine similarity or normalized BM25)
+ */
+export function computeWeightedRrfScore(
+  ranks: number[],
+  normalizedScores: number[],
+  k = 60,
+): number {
+  const rrfBase = ranks.reduce((sum, rank) => sum + 1 / (k + rank), 0);
+  // Use max score rather than average: the RRF base already rewards dual-source
+  // presence additively. Averaging scores penalizes "both" cards when one source
+  // returns a neutral confidence (e.g. kwRange=0 → 0.5), reducing the score below
+  // a single-source card with a high raw confidence. Max preserves the strongest
+  // signal while letting the rank component capture the "both sources" bonus.
+  const maxScore = normalizedScores.length > 0 ? Math.max(...normalizedScores) : 0;
+  return rrfBase * 0.75 + maxScore * 0.25;
+}
+
+/**
+ * Minimum number of signal hits before a repo earns a text-affinity boost.
+ * A threshold of 2 prevents single spurious keyword matches (e.g. a query
+ * containing the word "client") from distorting the affinity multiplier.
+ */
+const MIN_SIGNAL_HITS = 2;
+
+/**
+ * Counts how many keyword signals each repo matches against the query.
+ * Signals are loaded from the `repo_signals` table (generated at index time
+ * from detected stack profile + LLM docs). Returns an empty map if no signals
+ * are stored — the embedding classifier handles affinity in that case.
+ *
+ * Requires at least MIN_SIGNAL_HITS matches before a repo earns a score entry,
+ * preventing single-word false positives.
+ */
+function detectTextRepoAffinity(query: string): Map<string, number> {
+  const lower = query.toLowerCase();
+  const scores = new Map<string, number>();
+  for (const [repo, signals] of loadRepoSignals()) {
+    let hits = 0;
+    for (const signal of signals) {
+      if (lower.includes(signal)) hits++;
+    }
+    if (hits >= MIN_SIGNAL_HITS) scores.set(repo, hits);
+  }
+  return scores;
+}
+
+/**
+ * Runs semantic and keyword search in parallel, then fuses results with:
+ *  - Semantic weight: 0.7, keyword weight: 0.3
+ *  - 1.2x boost for cards appearing in both result sets
+ *  - Card-type multiplier (hubs penalized at 0.4x)
+ *  - Usage-count logarithmic boost
+ *  - Specificity_score boost (populated after centroid computation)
+ *  - Repo-affinity multiplier (text signals + embedding-based classifier)
+ *
+ * @param semanticQuery - optional override for the query used in semantic
+ *   search only (BM25 always uses the original query). Used for prefix-
+ *   boosted embeddings in codeprism_context.
+ */
+export async function hybridSearch(
+  query: string,
+  options?: { branch?: string; limit?: number; semanticQuery?: string; skipUsageUpdate?: boolean },
+): Promise<SearchResult[]> {
+  const limit = options?.limit ?? 5;
+  const branch = options?.branch;
+  const semanticQuery = options?.semanticQuery ?? query;
+  const skipUsageUpdate = options?.skipUsageUpdate ?? false;
+
+  const fetchLimit = limit * 4;
+
+  // Run HyDE, query expansion, and keyword search in parallel.
+  //
+  // HyDE (semantic leg): asks the LLM to write a hypothetical card then embeds
+  // THAT instead of the raw query — the vector sits much closer to real card
+  // vectors for natural-language questions like "how does auth work?".
+  //
+  // Query expansion (keyword leg): asks the LLM to generate 2-3 alternative
+  // keyword-focused queries with different vocabulary ("what handles billing
+  // transactions?" → ["payment processing service", "invoice creation handler",
+  // "billing controller charge"]) and runs BM25 on each. For each card we keep
+  // the best rank across all keyword runs, improving recall for queries that
+  // paraphrase the card title. Skipped for short/identifier queries and when no
+  // LLM is configured.
+  const [hydeEmbedding, keywordResults, expandedQueries] = await Promise.all([
+    hydeEmbed(query),
+    Promise.resolve(keywordSearch(query, fetchLimit)),
+    expandQuery(query),
+  ]);
+
+  // Merge expanded keyword results: for each card keep the best (most negative)
+  // BM25 rank across the original query and all expanded variants.
+  if (expandedQueries.length > 0) {
+    for (const altQuery of expandedQueries) {
+      const altResults = keywordSearch(altQuery, fetchLimit);
+      for (const alt of altResults) {
+        const existing = keywordResults.find((r) => r.cardId === alt.cardId);
+        if (!existing) {
+          // Card only found via expanded query — add it
+          keywordResults.push(alt);
+        } else if (alt.rank < existing.rank) {
+          // Better BM25 rank from the expanded query — upgrade
+          existing.rank = alt.rank;
+        }
+      }
+    }
+    // Re-sort after merge (BM25 rank is negative; lower = better).
+    // The keywordRankMap below is built from this sorted list, so no manual
+    // index update is needed here.
+    keywordResults.sort((a, b) => a.rank - b.rank);
+  }
+
+  const semanticResults = await semanticSearch(
+    semanticQuery,
+    fetchLimit,
+    branch,
+    hydeEmbedding ?? undefined,
+  );
+
+  // Build rank maps for RRF (position 0 = best match in each list)
+  const semanticRankMap = new Map<string, number>();
+  const semanticScoreMap = new Map<string, number>(); // cosine similarity [0,1]
+  for (let i = 0; i < semanticResults.length; i++) {
+    const r = semanticResults[i]!;
+    semanticRankMap.set(r.cardId, i);
+    // sqlite-vec returns cosine distance [0,2]; similarity = 1 - distance (clamped)
+    semanticScoreMap.set(r.cardId, Math.max(0, 1 - r.distance));
+  }
+
+  const keywordRankMap = new Map<string, number>();
+  // Normalize BM25 ranks: FTS5 returns negative values (more negative = better).
+  // Map the best rank to 1.0 and the worst to 0.0.
+  const kwMin = keywordResults.length > 0 ? Math.min(...keywordResults.map((r) => r.rank)) : 0;
+  const kwMax = keywordResults.length > 0 ? Math.max(...keywordResults.map((r) => r.rank)) : 0;
+  const kwRange = kwMax - kwMin;
+  const keywordScoreMap = new Map<string, number>(); // normalized BM25 [0,1]
+  for (let i = 0; i < keywordResults.length; i++) {
+    const r = keywordResults[i]!;
+    keywordRankMap.set(r.cardId, i);
+    // Lower (more negative) rank = better. Invert so 1.0 = best, 0.0 = worst.
+    // Formula: (kwMax - r.rank) / kwRange maps best (kwMin) → 1.0 and worst (kwMax) → 0.0.
+    // When kwRange === 0, all scores are identical — use neutral 0.5.
+    keywordScoreMap.set(r.cardId, kwRange !== 0 ? (kwMax - r.rank) / kwRange : 0.5);
+  }
+
+  // Union of all candidate IDs from both retrieval lists
+  const allCandidateIds = new Set<string>([
+    ...semanticRankMap.keys(),
+    ...keywordRankMap.keys(),
+  ]);
+
+  if (allCandidateIds.size === 0) return [];
+
+  const db = getDb();
+  const ids = [...allCandidateIds];
+  const placeholders = ids.map(() => "?").join(", ");
+  const allCards = db
+    .prepare(`SELECT * FROM cards WHERE id IN (${placeholders})`)
+    .all(...ids) as Card[];
+  const cardMap = new Map(allCards.map((c) => [c.id, c]));
+
+  // --- Repo affinity: both text and embedding run always, blended ---
+  //
+  // Text signals (fast, synchronous): precise for explicit keyword queries
+  //   ("the Rails controller", "the Vue composable", "pre_authorization billing")
+  // Embedding classifier (async, centroid-based): robust for semantic queries
+  //   ("how does payment work?", "what handles device pairing?")
+  //
+  // Running both always and blending at 60/40 means neither becomes dead code.
+  // When text signals are absent (fresh install / no signals generated yet),
+  // only the embedding signal applies (multiplier weight shifts to 1.0 embedding).
+
+  const textAffinity = detectTextRepoAffinity(query);
+  const maxTextAffinity = textAffinity.size > 0 ? Math.max(...textAffinity.values()) : 0;
+
+  // Embedding classifier — always attempt, non-blocking on failure
+  let embeddingClassification: Map<string, number> | null = null;
+  if (semanticResults.length > 0) {
+    try {
+      const qEmb = await getEmbedder().embed(semanticQuery, "query");
+      const cls = classifyQueryEmbedding(qEmb);
+      if (cls.confidence > 0.03 && cls.topRepo) {
+        embeddingClassification = cls.scores;
+      }
+    } catch { /* non-critical — centroid cache may be cold */ }
+  }
+
+  const combined: {
+    cardId: string;
+    score: number;
+    source: "semantic" | "keyword" | "both";
+  }[] = [];
+
+  for (const cardId of allCandidateIds) {
+    const semRank = semanticRankMap.get(cardId);
+    const kwRank  = keywordRankMap.get(cardId);
+
+    const hasSemantic = semRank !== undefined;
+    const hasKeyword  = kwRank  !== undefined;
+    const source: "semantic" | "keyword" | "both" =
+      hasSemantic && hasKeyword ? "both"
+      : hasSemantic ? "semantic"
+      : "keyword";
+
+    // Score-weighted RRF — blends rank position with raw confidence scores
+    const ranks: number[] = [];
+    const normalizedScores: number[] = [];
+    if (semRank !== undefined) {
+      ranks.push(semRank);
+      normalizedScores.push(semanticScoreMap.get(cardId) ?? 0);
+    }
+    if (kwRank !== undefined) {
+      ranks.push(kwRank);
+      normalizedScores.push(keywordScoreMap.get(cardId) ?? 0);
+    }
+    let score = computeWeightedRrfScore(ranks, normalizedScores);
+
+    const card = cardMap.get(cardId);
+    if (!card) continue;
+
+    // Stale cards are outdated — demote them so fresh cards win rank-1,
+    // but keep them findable (0.8x rather than filtering them out entirely).
+    if (card.stale) score *= 0.8;
+
+    score *= TYPE_BOOST[card.card_type] ?? 1.0;
+    score *= 1 + 0.05 * Math.log2(1 + card.usage_count);
+
+    const specificity = card.specificity_score;
+    if (specificity != null) score *= 0.6 + 0.4 * specificity;
+
+    // --- Blended repo-affinity multiplier ---
+    // Parses the card's repo list once; both text and embedding paths use it.
+    let cardRepos: string[] = [];
+    try { cardRepos = JSON.parse(card.source_repos); } catch { /* skip */ }
+
+    // Text-affinity component (0.6x–1.0x range, weight 0.60)
+    let textMultiplier = 0.6; // base penalty for no match
+    if (maxTextAffinity > 0) {
+      let bestHits = 0;
+      for (const repo of cardRepos) bestHits = Math.max(bestHits, textAffinity.get(repo) ?? 0);
+      textMultiplier = 0.6 + 0.4 * (bestHits / maxTextAffinity);
+    }
+
+    // Embedding-affinity component (0.85x–1.15x range, weight 0.40)
+    let embMultiplier = 1.0; // neutral when classifier unavailable
+    if (embeddingClassification) {
+      let maxSim = 0;
+      for (const repo of cardRepos) maxSim = Math.max(maxSim, embeddingClassification.get(repo) ?? 0);
+      const allSims = [...embeddingClassification.values()];
+      const minSim  = Math.min(...allSims);
+      const simRange = Math.max(...allSims) - minSim;
+      const normalized = simRange > 0 ? (maxSim - minSim) / simRange : 0.5;
+      embMultiplier = 0.85 + 0.30 * normalized;
+    }
+
+    // Blend: 60% text, 40% embedding. When text signals are absent (textAffinity.size === 0),
+    // textMultiplier stays at its base 0.6, and embMultiplier carries the full signal.
+    // Avoid double-penalizing by using max when no text signals are stored yet.
+    const repoMultiplier = textAffinity.size > 0
+      ? textMultiplier * 0.60 + embMultiplier * 0.40
+      : embMultiplier; // no text signals → embedding only
+
+    score *= repoMultiplier;
+
+    combined.push({ cardId, score, source });
+  }
+
+  combined.sort((a, b) => b.score - a.score);
+
+  // Read max_hub_cards from search_config (default 2) to prevent hub noise
+  // Using Number.isNaN so that max_hub_cards=0 is honoured (fully suppress hubs)
+  const hubCapRow = db
+    .prepare("SELECT value FROM search_config WHERE key = 'max_hub_cards'")
+    .get() as { value: string } | undefined;
+  const parsedHubCap = hubCapRow ? parseInt(hubCapRow.value, 10) : NaN;
+  const MAX_HUB_CARDS = Number.isNaN(parsedHubCap) ? 2 : parsedHubCap;
+
+  // Build SearchResult[] from top candidates (return up to limit*3 for callers
+  // that want to apply their own reranking — e.g. codeprism_context).
+  const FETCH_LIMIT = Math.max(limit * 3, 15);
+  const candidateResults: SearchResult[] = [];
+  for (const entry of combined.slice(0, FETCH_LIMIT)) {
+    const card = cardMap.get(entry.cardId);
+    if (card) {
+      candidateResults.push({ card, score: entry.score, source: entry.source });
+    }
+  }
+
+  if (candidateResults.length === 0) return [];
+
+  // Reranking is intentionally NOT done inside hybridSearch.
+  // codeprism_search returns fast RRF results; codeprism_context applies
+  // the cross-encoder reranker on top. This avoids double-reranking and
+  // keeps the base search path low-latency for all MCP clients.
+  const orderedResults = candidateResults;
+
+  // Apply hub cap + limit on final ordered results.
+  // RAPTOR clusters are capped at 1 (they cover broad topics; one is enough).
+  const cappedResults: SearchResult[] = [];
+  let hubCount = 0;
+  let raptorCount = 0;
+  for (const result of orderedResults) {
+    if (result.card.card_type === "hub") {
+      if (hubCount >= MAX_HUB_CARDS) continue;
+      hubCount++;
+    }
+    if (result.card.card_type === "raptor_cluster") {
+      if (raptorCount >= 1) continue;
+      raptorCount++;
+    }
+    cappedResults.push(result);
+    if (cappedResults.length >= limit) break;
+  }
+
+  if (cappedResults.length === 0) return [];
+
+  if (!skipUsageUpdate) {
+    const resultCardIds = cappedResults.map((r) => r.card.id);
+    const updateStmt = db.prepare(
+      "UPDATE cards SET usage_count = usage_count + 1 WHERE id = ?",
+    );
+    const incrementUsage = db.transaction((cids: string[]) => {
+      for (const id of cids) updateStmt.run(id);
+    });
+    incrementUsage(resultCardIds);
+  }
+
+  return cappedResults.map((r) => ({
+    ...r,
+    card: skipUsageUpdate ? r.card : { ...r.card, usage_count: r.card.usage_count + 1 },
+  }));
+}

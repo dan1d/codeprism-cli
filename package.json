@@ -1,0 +1,68 @@
+{
+  "name": "codeprism",
+  "version": "0.1.0",
+  "description": "Index your codebase locally and push AI knowledge cards to a codeprism engine",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "mcp",
+    "code-context",
+    "knowledge-graph",
+    "ai-coding",
+    "tree-sitter",
+    "codebase-indexer",
+    "cursor",
+    "windsurf",
+    "claude"
+  ],
+  "bin": {
+    "codeprism": "./dist/cli/codeprism.js"
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/codeprism.ts",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.77.0",
+    "@google/generative-ai": "^0.24.1",
+    "@huggingface/transformers": "latest",
+    "better-sqlite3": "latest",
+    "commander": "^14.0.3",
+    "glob": "latest",
+    "graphology": "^0.26.0",
+    "graphology-communities-louvain": "^2.0.2",
+    "graphology-metrics": "^2.4.0",
+    "graphology-types": "^0.24.8",
+    "ignore": "^7.0.5",
+    "nanoid": "latest",
+    "openai": "^6.22.0",
+    "sqlite-vec": "latest",
+    "tree-sitter": "latest",
+    "tree-sitter-javascript": "latest",
+    "tree-sitter-ruby": "latest",
+    "tree-sitter-typescript": "latest",
+    "tree-sitter-vue": "latest",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "latest",
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dan1d/codeprism-cli.git"
+  },
+  "homepage": "https://codeprism.dev",
+  "bugs": {
+    "url": "https://github.com/dan1d/codeprism-cli/issues"
+  }
+}
