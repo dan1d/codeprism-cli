@@ -22,11 +22,10 @@ interface RateConfig { delayMs: number; concurrency: number }
 
 function providerRateConfig(providerName: string): RateConfig {
   switch (providerName) {
-    // Anthropic Tier 2: 1K RPM / 450K input TPM / 90K output TPM
-    // Real ceiling is output TPM (90K): at ~900 tokens/card, 5× parallel ≈ 90K output TPM
-    // delayMs: 100ms stagger avoids burst spikes; RPM stays well under 1K
-    case "anthropic": return { delayMs: 100,  concurrency: 5 };
-    case "openai":    return { delayMs: 200,  concurrency: 5 }; // 500+ RPM
+    // Anthropic: conservative concurrency to avoid 529 overloaded errors.
+    // Users may be on Tier 1/2 with varying output TPM limits.
+    case "anthropic": return { delayMs: 300,  concurrency: 2 };
+    case "openai":    return { delayMs: 200,  concurrency: 4 };
     case "deepseek":  return { delayMs: 200,  concurrency: 5 }; // generous limits
     case "gemini":    return { delayMs: 4200, concurrency: 1 }; // 15 RPM free tier
     default:          return { delayMs: 1500, concurrency: 2 };
@@ -70,6 +69,9 @@ class RateLimiter {
 // Module-level limiter — initialised by generateCards() before each run.
 let activeLimiter: RateLimiter = new RateLimiter(4200, 1);
 
+const RETRYABLE_CODES = new Set([429, 529, 503, 502]);
+const MAX_RETRIES = 4;
+
 async function callLlm(
   llm: LLMProvider,
   prompt: string,
@@ -77,10 +79,25 @@ async function callLlm(
   maxTokens = 1024,
 ): Promise<string> {
   return activeLimiter.run(async () => {
-    const content = await llm.generate(prompt, { systemPrompt: SYSTEM_PROMPT, maxTokens });
-    const tokens = llm.estimateTokens(content);
-    console.log(`  [llm] ${label} — ~${tokens} output tokens`);
-    return content;
+    let attempt = 0;
+    while (true) {
+      try {
+        const content = await llm.generate(prompt, { systemPrompt: SYSTEM_PROMPT, maxTokens });
+        const tokens = llm.estimateTokens(content);
+        console.log(`  [llm] ${label} — ~${tokens} output tokens`);
+        return content;
+      } catch (err: unknown) {
+        attempt++;
+        const status = (err as { status?: number })?.status ?? (err as { statusCode?: number })?.statusCode;
+        const isRetryable = RETRYABLE_CODES.has(status ?? 0) ||
+          String(err).includes("overloaded") ||
+          String(err).includes("529");
+        if (!isRetryable || attempt > MAX_RETRIES) throw err;
+        const delay = Math.min(2000 * 2 ** (attempt - 1), 30_000); // 2s, 4s, 8s, 16s cap 30s
+        console.log(`  [llm] ${label} — ${status ?? "overloaded"}, retry ${attempt}/${MAX_RETRIES} in ${delay / 1000}s…`);
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
   });
 }
 
