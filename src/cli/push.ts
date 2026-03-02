@@ -86,9 +86,10 @@ export async function runPush(opts: PushOptions): Promise<void> {
     process.exit(1);
   }
 
-  const result = await res.json() as { ok: boolean; cards: number; files: number; docs: number };
+  const result = await res.json() as { ok: boolean; cards: number; files: number; docs: number; repos: number };
 
   console.log(`✅  Push complete!`);
+  console.log(`    Repos   : ${result.repos ?? "?"}`);
   console.log(`    Cards   : ${result.cards}`);
   console.log(`    Files   : ${result.files}`);
   console.log(`    Docs    : ${result.docs}`);
