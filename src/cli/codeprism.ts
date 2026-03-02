@@ -21,6 +21,7 @@ import { listRules, addRule, deleteRule } from "./rules.js";
 import { runSync } from "./sync.js";
 import { installHook } from "./install-hook.js";
 import { runPush } from "./push.js";
+import { installRules } from "./install-rules.js";
 
 const program = new Command("codeprism");
 program.version("0.1.0");
@@ -237,6 +238,22 @@ program
       db:        opts.db,
       delete:    opts.delete,
     });
+  });
+
+// ---------------------------------------------------------------------------
+// codeprism install-rules
+// ---------------------------------------------------------------------------
+
+program
+  .command("install-rules")
+  .description(
+    "Write AI rule files that instruct your editor to always consult codeprism before any task. " +
+    "Auto-detects Cursor, Claude Code, Windsurf, and Zed from config files present in the current directory.",
+  )
+  .option("--editor <name>", "target a specific editor: cursor | claude | windsurf | zed")
+  .option("--all", "install rules for all supported editors", false)
+  .action(async (opts: { editor?: string; all: boolean }) => {
+    await installRules(process.cwd(), opts);
   });
 
 program.parse(process.argv);
