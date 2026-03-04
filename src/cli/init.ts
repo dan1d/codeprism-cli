@@ -16,8 +16,10 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, basename, relative } from "node:path";
 import { homedir } from "node:os";
 import { checkbox, input, password, select, confirm } from "@inquirer/prompts";
+import chalk from "chalk";
 import { discoverRepos } from "../config/workspace-config.js";
 import { installHook, findGitRoot } from "./install-hook.js";
+import { indexRepos } from "./index-repos.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -240,12 +242,12 @@ export async function runInit(cwd: string): Promise<void> {
   const configDir = join(cwd, ".codeprism");
   const configPath = join(configDir, "config.json");
 
-  console.log(`
-╔══════════════════════════════════════════════╗
-║           codeprism workspace setup          ║
-╚══════════════════════════════════════════════╝
-`);
-  console.log(`  Workspace root: ${cwd}\n`);
+  console.log("");
+  console.log(chalk.cyan("  ╔══════════════════════════════════════════════╗"));
+  console.log(chalk.cyan("  ║") + chalk.white.bold("           codeprism workspace setup          ") + chalk.cyan("║"));
+  console.log(chalk.cyan("  ╚══════════════════════════════════════════════╝"));
+  console.log("");
+  console.log(`  Workspace root: ${chalk.cyan(cwd)}\n`);
 
   // Step 0a: Check if a parent directory already has .codeprism/
   const parentConfig = findParentConfig(cwd);
@@ -332,11 +334,11 @@ export async function runInit(cwd: string): Promise<void> {
   }
 
   if (repos.length >= 2) {
-    console.log(`
-  Multi-repo workspace detected!
-  Indexing ${repos.length} repos together generates cross-service cards
-  mapping API connections between them.
-`);
+    console.log("");
+    console.log(`  ${chalk.yellow.bold("Multi-repo workspace detected!")}`);
+    console.log(chalk.dim(`  Indexing ${repos.length} repos together generates cross-service cards`));
+    console.log(chalk.dim("  mapping API connections between them."));
+    console.log("");
   }
 
   // ── Step 2: Engine URL ───────────────────────────────────────────────
@@ -367,7 +369,7 @@ export async function runInit(cwd: string): Promise<void> {
     });
     if (!proceed) return;
   } else {
-    console.log(`  Connected to: ${validation.teamName}\n`);
+    console.log(`  ${chalk.green("✓")} Connected to: ${chalk.cyan.bold(validation.teamName)}\n`);
   }
 
   // Fetch dev email for MCP headers
@@ -388,7 +390,7 @@ export async function runInit(cwd: string): Promise<void> {
 
   if (detected.length > 0) {
     const editorNames = detected.map((e) => e.name).join(", ");
-    console.log(`  Detected editors: ${editorNames}\n`);
+    console.log(`  ${chalk.green("✓")} Detected editors: ${chalk.white(editorNames)}\n`);
 
     const installMcp = await checkbox({
       message: "Install MCP config for:",
@@ -403,9 +405,9 @@ export async function runInit(cwd: string): Promise<void> {
       const cfgPath = editor.configPath(cwd);
       try {
         editor.writeMcpConfig(cfgPath, mcpUrl, apiKey, devEmail);
-        console.log(`  ✓ ${editor.name} — MCP config written to ${cfgPath}`);
+        console.log(`  ${chalk.green("✓")} ${chalk.white(editor.name)} — MCP config written to ${chalk.dim(cfgPath)}`);
       } catch (err) {
-        console.warn(`  ✗ ${editor.name} — failed: ${(err as Error).message}`);
+        console.warn(`  ${chalk.red("✗")} ${editor.name} — failed: ${(err as Error).message}`);
       }
     }
     console.log("");
@@ -461,13 +463,13 @@ export async function runInit(cwd: string): Promise<void> {
       const repoAbs = resolve(cwd, repo.path);
       const gitRoot = findGitRoot(repoAbs);
       if (!gitRoot) {
-        console.warn(`  ✗ ${repo.name} — not a git repository, skipping hooks`);
+        console.warn(`  ${chalk.red("✗")} ${repo.name} — not a git repository, skipping hooks`);
         continue;
       }
       try {
         await installHook(repoAbs, { base: "main", strict: false, engineUrl: cleanEngineUrl });
       } catch (err) {
-        console.warn(`  ✗ ${repo.name} — hook install failed: ${(err as Error).message}`);
+        console.warn(`  ${chalk.red("✗")} ${repo.name} — hook install failed: ${(err as Error).message}`);
       }
     }
   }
@@ -499,7 +501,7 @@ export async function runInit(cwd: string): Promise<void> {
   // ── Step 7: Fetch team rules ─────────────────────────────────────────
   console.log("  Fetching team rules...");
   const rules = await fetchTeamRules(cleanEngineUrl, apiKey);
-  console.log(`  ${rules.length} rule(s) cached.\n`);
+  console.log(`  ${chalk.green("✓")} ${rules.length} rule(s) cached.\n`);
 
   // ── Step 8: Create .codeprism/ directory ─────────────────────────────
   mkdirSync(configDir, { recursive: true });
@@ -519,34 +521,71 @@ export async function runInit(cwd: string): Promise<void> {
   writeFileSync(join(configDir, ".gitignore"), "config.json\n", "utf-8");
 
   // ── Summary ──────────────────────────────────────────────────────────
-  console.log(`
-╔══════════════════════════════════════════════╗
-║             Setup complete!                  ║
-╚══════════════════════════════════════════════╝
+  console.log("");
+  console.log(chalk.cyan("        ╱╲"));
+  console.log(chalk.cyan("       ╱  ╲    ") + chalk.red("━━━"));
+  console.log(chalk.cyan("      ╱ ◆◆ ╲   ") + chalk.yellow("━━━━"));
+  console.log(chalk.cyan("     ╱      ╲  ") + chalk.green("━━━━━"));
+  console.log(chalk.cyan("    ╱────────╲ ") + chalk.blue("━━━━━━"));
+  console.log("");
+  console.log(chalk.green.bold("    ✓ Setup complete!"));
+  console.log("");
+  console.log(chalk.dim("  Created:"));
+  console.log(`    ${chalk.white(".codeprism/config.json")}  ${chalk.dim("— workspace config (git-ignored)")}`);
+  console.log(`    ${chalk.white(".codeprism/rules.json")}   ${chalk.dim("— cached team rules")}`);
+  console.log(`    ${chalk.white(".codeprism/.gitignore")}   ${chalk.dim("— protects API key")}`);
+  console.log("");
+  console.log(`  ${chalk.dim("Repos:")}  ${chalk.cyan(repos.map((r) => r.name).join(", "))}`);
+  console.log(`  ${chalk.dim("Engine:")} ${chalk.cyan(cleanEngineUrl)}`);
+  console.log("");
 
-  Created:
-    .codeprism/config.json  — workspace config (git-ignored)
-    .codeprism/rules.json   — cached team rules
-    .codeprism/.gitignore   — protects API key
+  // ── Step 9: Auto-run indexing ───────────────────────────────────────
+  if (llmConfig) {
+    process.env["CODEPRISM_LLM_PROVIDER"] = llmConfig.provider;
+    process.env["CODEPRISM_LLM_API_KEY"] = llmConfig.apiKey;
 
-  Repos: ${repos.map((r) => r.name).join(", ")}
-  Engine: ${cleanEngineUrl}
-`);
+    console.log(chalk.yellow.bold("  ▶ Starting indexing...\n"));
 
-  // Build the index command with env vars
-  const envPrefix = llmConfig
-    ? `CODEPRISM_LLM_PROVIDER=${llmConfig.provider} CODEPRISM_LLM_API_KEY=<your-key> `
-    : `CODEPRISM_LLM_PROVIDER=anthropic CODEPRISM_LLM_API_KEY=<your-key> `;
+    try {
+      await indexRepos(
+        repos.map((r) => ({ name: r.name, path: r.path })),
+        cwd,
+        {
+          force: true,
+          allConfiguredRepos: repos.map((r) => ({ name: r.name, path: r.path })),
+        },
+      );
 
-  console.log(`  Next steps:
-
-    1. Index your repos:
-       ${envPrefix}npx codeprism index
-
-    2. Push to the team engine:
-       npx codeprism push
-
-  The push command reads engine URL and API key from .codeprism/config.json
-  — no flags needed!
-`);
+      console.log("");
+      console.log(chalk.green.bold("  ✓ Indexing complete!"));
+      console.log("");
+      console.log(`  ${chalk.dim("Next step:")}`);
+      console.log("");
+      console.log(`    ${chalk.white("npx codeprism push")}`);
+      console.log("");
+      console.log(chalk.dim("  The push command reads engine URL and API key from .codeprism/config.json"));
+      console.log(chalk.dim("  — no flags needed!"));
+      console.log("");
+    } catch (err) {
+      console.error("");
+      console.error(chalk.red(`  ✗ Indexing failed: ${(err as Error).message}`));
+      console.error("");
+      console.log(`  ${chalk.dim("You can retry manually:")}`);
+      console.log("");
+      console.log(`    ${chalk.white(`CODEPRISM_LLM_PROVIDER=${llmConfig.provider} CODEPRISM_LLM_API_KEY=<your-key> npx codeprism index`)}`);
+      console.log("");
+    }
+  } else {
+    console.log(`  ${chalk.dim("Next steps:")}`);
+    console.log("");
+    console.log(`    ${chalk.white("1.")} Index your repos:`);
+    console.log(`       ${chalk.cyan("CODEPRISM_LLM_PROVIDER=deepseek CODEPRISM_LLM_API_KEY=<key>")} npx codeprism index`);
+    console.log("");
+    console.log(`    ${chalk.white("2.")} Push to the team engine:`);
+    console.log(`       ${chalk.cyan("npx codeprism push")}`);
+    console.log("");
+    console.log(chalk.dim("  The push command reads engine URL and API key from .codeprism/config.json"));
+    console.log(chalk.dim("  — no flags needed!"));
+    console.log("");
+  }
 }

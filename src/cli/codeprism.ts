@@ -27,7 +27,7 @@ import { runInit } from "./init.js";
 import { runUninstall } from "./uninstall.js";
 
 const program = new Command("codeprism");
-program.version("0.2.1");
+program.version("0.2.2");
 
 // ---------------------------------------------------------------------------
 // codeprism init
@@ -73,6 +73,12 @@ program
   }) => {
     const workspaceRoot = userWorkspaceRootFrom(import.meta.url);
     const config = loadWorkspaceConfig(workspaceRoot);
+
+    // Populate env vars from .codeprism/config.json LLM settings if not already set
+    if (config.llm) {
+      if (!process.env["CODEPRISM_LLM_PROVIDER"]) process.env["CODEPRISM_LLM_PROVIDER"] = config.llm.provider;
+      if (!process.env["CODEPRISM_LLM_API_KEY"])   process.env["CODEPRISM_LLM_API_KEY"]   = config.llm.apiKey;
+    }
 
     // Prominently show workspace root so users catch wrong-directory mistakes
     const cwdIsWorkspace = resolve(process.cwd()) === resolve(config.workspaceRoot);
