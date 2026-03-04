@@ -35,9 +35,17 @@ export interface LoadedWorkspaceConfig {
   exclude: string[];
   /** Whether the config was loaded from a file or auto-discovered. */
   source: "file" | "auto";
+  /** Engine URL from .codeprism/config.json (if present). */
+  engineUrl?: string;
+  /** Team API key from .codeprism/config.json (if present). */
+  apiKey?: string;
+  /** LLM config from .codeprism/config.json (if present). */
+  llm?: { provider: string; apiKey: string };
 }
 
 const CONFIG_FILENAME = "codeprism.config.json";
+const INIT_CONFIG_DIR = ".codeprism";
+const INIT_CONFIG_FILENAME = "config.json";
 
 // Markers that indicate a directory is a repository root.
 const REPO_MARKERS = [
@@ -56,14 +64,30 @@ const REPO_MARKERS = [
 /**
  * Load workspace configuration.
  *
- * 1. If `codeprism.config.json` exists at `workspaceRoot`, parse and validate it.
- * 2. Otherwise fall back to auto-discovery (scan sibling directories for repos).
+ * Resolution order:
+ * 1. `.codeprism/config.json` — created by `codeprism init`
+ * 2. `codeprism.config.json`  — legacy explicit config
+ * 3. Auto-discovery            — scan sibling directories for repos
  */
 export function loadWorkspaceConfig(workspaceRoot: string): LoadedWorkspaceConfig {
+  // Priority 1: .codeprism/config.json (init wizard output)
+  const initConfigPath = join(workspaceRoot, INIT_CONFIG_DIR, INIT_CONFIG_FILENAME);
+  if (existsSync(initConfigPath)) return loadFromInitConfig(initConfigPath, workspaceRoot);
+
+  // Priority 2: codeprism.config.json (legacy)
   const configPath = join(workspaceRoot, CONFIG_FILENAME);
   if (existsSync(configPath)) return loadFromFile(configPath, workspaceRoot);
 
   return autoDiscover(workspaceRoot);
+}
+
+/**
+ * Public API: discover repos in a directory (for use by `codeprism init`).
+ * Returns resolved repos found by scanning the directory.
+ */
+export function discoverRepos(dir: string): ResolvedRepo[] {
+  const result = autoDiscover(dir);
+  return result.repos;
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +118,55 @@ function loadFromFile(configPath: string, fallbackRoot: string): LoadedWorkspace
   const exclude = resolveExclude(cfg);
 
   return { workspaceRoot, repos, exclude, source: "file" };
+}
+
+// ---------------------------------------------------------------------------
+// .codeprism/config.json (init wizard format)
+// ---------------------------------------------------------------------------
+
+function loadFromInitConfig(configPath: string, fallbackRoot: string): LoadedWorkspaceConfig {
+  const raw = readFileSync(configPath, "utf-8");
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(
+      `Invalid JSON in ${configPath}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
+
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error(`${configPath}: expected a JSON object at the top level`);
+  }
+
+  const cfg = parsed as Record<string, unknown>;
+  // .codeprism/ is inside the workspace root, so configDir's parent IS the root
+  const configDir = dirname(dirname(configPath));
+
+  const repos = resolveRepos(cfg, configDir);
+  const exclude = resolveExclude(cfg);
+
+  const engineUrl = typeof cfg.engineUrl === "string" ? cfg.engineUrl : undefined;
+  const apiKey = typeof cfg.apiKey === "string" ? cfg.apiKey : undefined;
+
+  let llm: { provider: string; apiKey: string } | undefined;
+  if (cfg.llm && typeof cfg.llm === "object" && !Array.isArray(cfg.llm)) {
+    const llmObj = cfg.llm as Record<string, unknown>;
+    if (typeof llmObj.provider === "string" && typeof llmObj.apiKey === "string") {
+      llm = { provider: llmObj.provider, apiKey: llmObj.apiKey };
+    }
+  }
+
+  return {
+    workspaceRoot: configDir || fallbackRoot,
+    repos,
+    exclude,
+    source: "file",
+    engineUrl,
+    apiKey,
+    llm,
+  };
 }
 
 function resolveWorkspaceRoot(

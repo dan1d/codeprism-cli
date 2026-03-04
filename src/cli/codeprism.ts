@@ -10,6 +10,7 @@
  */
 /* eslint-disable no-console */
 
+import { resolve } from "node:path";
 import { Command } from "commander";
 import { userWorkspaceRootFrom } from "../utils/workspace.js";
 import { loadWorkspaceConfig } from "../config/workspace-config.js";
@@ -22,9 +23,23 @@ import { runSync } from "./sync.js";
 import { installHook } from "./install-hook.js";
 import { runPush } from "./push.js";
 import { installRules } from "./install-rules.js";
+import { runInit } from "./init.js";
 
 const program = new Command("codeprism");
 program.version("0.1.0");
+
+// ---------------------------------------------------------------------------
+// codeprism init
+// ---------------------------------------------------------------------------
+
+program
+  .command("init")
+  .description(
+    "Interactive setup wizard — configure repos, engine, MCP editor config, and LLM provider",
+  )
+  .action(async () => {
+    await runInit(process.cwd());
+  });
 
 // ---------------------------------------------------------------------------
 // codeprism index
@@ -58,9 +73,13 @@ program
     const workspaceRoot = userWorkspaceRootFrom(import.meta.url);
     const config = loadWorkspaceConfig(workspaceRoot);
 
-    console.log(
-      `[codeprism] Workspace: ${config.workspaceRoot} (${config.source} config, ${config.repos.length} repos)`,
-    );
+    // Prominently show workspace root so users catch wrong-directory mistakes
+    const cwdIsWorkspace = resolve(process.cwd()) === resolve(config.workspaceRoot);
+    console.log(`[codeprism] Workspace: ${config.workspaceRoot} (${config.source} config, ${config.repos.length} repos)`);
+    if (!cwdIsWorkspace) {
+      console.log(`[codeprism] Note: using workspace found at ${config.workspaceRoot} (not cwd: ${process.cwd()})`);
+      console.log(`[codeprism] Repos: ${config.repos.map((r) => r.name).join(", ")}`);
+    }
 
     // Parse ticket ID from URL or raw ID
     let ticketId: string | undefined;
@@ -96,6 +115,7 @@ program
         skipDocs: opts.skipDocs,
         forceDocs: opts.forceDocs,
         fetchRemote: opts.fetchRemote,
+        allConfiguredRepos: config.repos.map((r) => ({ name: r.name, path: r.path })),
       },
     );
   });

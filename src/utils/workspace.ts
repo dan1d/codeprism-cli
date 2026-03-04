@@ -17,6 +17,7 @@ export function userWorkspaceRootFrom(_importMetaUrl: string): string {
   // Walk up looking for an explicit config file
   let dir = cwd;
   while (true) {
+    if (existsSync(join(dir, ".codeprism", "config.json"))) return dir;
     if (existsSync(join(dir, "codeprism.config.json"))) return dir;
     const parent = resolve(dir, "..");
     if (parent === dir) break;

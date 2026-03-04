@@ -4,7 +4,7 @@ import { execSync } from "node:child_process";
 import { getDb, closeDb } from "../db/connection.js";
 import { runMigrations } from "../db/migrations.js";
 import { registry } from "../indexer/tree-sitter.js";
-import { buildGraph } from "../indexer/graph-builder.js";
+import { buildGraph, type GraphEdge } from "../indexer/graph-builder.js";
 import { detectFlows } from "../indexer/flow-detector.js";
 import { extractSeedFlows } from "../indexer/route-extractor.js";
 import { generateCards } from "../indexer/card-generator.js";
@@ -39,6 +39,7 @@ import {
   mergeSeedFlows,
   type DiscoveryResult,
 } from "../indexer/llm-discovery.js";
+import { loadCachedGraphEdges, loadCachedFileIndex, checkCacheStaleness } from "../db/cached-data.js";
 
 export interface IndexOptions {
   /** Reindex all repos regardless of git changes */
@@ -67,6 +68,13 @@ export interface IndexOptions {
    * on the CLI or set this to true when you need up-to-date remote branch data.
    */
   fetchRemote?: boolean;
+  /**
+   * All repos configured in the workspace (not just the ones being indexed).
+   * Used for incremental re-index: when --repo is specified and the workspace
+   * has more repos, cached data for non-target repos is loaded so cross-service
+   * card generation still sees all repos' data.
+   */
+  allConfiguredRepos?: Array<{ name: string; path: string }>;
 }
 
 /** Returns the HEAD commit SHA for a given repo directory, or null if git is unavailable. */
@@ -102,6 +110,14 @@ export async function indexRepos(repos: RepoConfig[], workspaceRoot: string, opt
   const skipDocs = opts.skipDocs ?? false;
   const forceDocs = opts.forceDocs ?? false;
   const skipDiscovery = opts.skipDiscovery ?? false;
+
+  // Incremental mode: --repo with a multi-repo workspace
+  const allConfigured = opts.allConfiguredRepos ?? [];
+  const targetRepoNames = repos.map((r) => r.name);
+  const isIncremental = repos.length === 1 && allConfigured.length > 1;
+  const otherRepoNames = isIncremental
+    ? allConfigured.filter((r) => !targetRepoNames.includes(r.name)).map((r) => r.name)
+    : [];
   const db = getDb();
   runMigrations(db);
 
@@ -155,7 +171,11 @@ export async function indexRepos(repos: RepoConfig[], workspaceRoot: string, opt
   }
 
   console.log(`\n=== codeprism indexer ===\n`);
-  console.log(`Repos to index: ${repos.map((r) => r.name).join(", ")}\n`);
+  console.log(`Repos to index: ${repos.map((r) => r.name).join(", ")}`);
+  if (isIncremental) {
+    console.log(`Mode: incremental — cached data from ${otherRepoNames.join(", ")} will be used for cross-service cards`);
+  }
+  console.log("");
 
   const allParsed: ParsedFile[] = [];
   const commitShaByRepo = new Map<string, string>();
@@ -320,7 +340,15 @@ export async function indexRepos(repos: RepoConfig[], workspaceRoot: string, opt
   const edges = buildGraph(allParsed);
   console.log(`  -> ${edges.length} edges found`);
 
-  db.prepare("DELETE FROM graph_edges").run();
+  // Scoped cleanup: incremental mode deletes only target repo's edges
+  if (isIncremental) {
+    for (const repoName of targetRepoNames) {
+      db.prepare("DELETE FROM graph_edges WHERE repo = ?").run(repoName);
+    }
+  } else {
+    db.prepare("DELETE FROM graph_edges").run();
+  }
+
   const insertEdge = db.prepare(
     `INSERT INTO graph_edges (source_file, target_file, relation, metadata, repo)
      VALUES (?, ?, ?, ?, ?)`
@@ -337,6 +365,68 @@ export async function indexRepos(repos: RepoConfig[], workspaceRoot: string, opt
     }
   });
   insertEdgeTx();
+
+  // =========================================================================
+  // Phase 2b — Load cached data for incremental re-index
+  // =========================================================================
+
+  if (isIncremental && otherRepoNames.length > 0) {
+    console.log(`\n=== Phase 2b: Loading cached data for ${otherRepoNames.join(", ")} ===\n`);
+
+    // Check staleness
+    const staleRepos = checkCacheStaleness(db, otherRepoNames, 30);
+    if (staleRepos.length > 0) {
+      console.warn(`  ⚠ Cached data for ${staleRepos.join(", ")} is older than 30 days.`);
+      console.warn(`    Consider running a full re-index: npx codeprism index\n`);
+    }
+
+    // Load cached graph edges and inject them into the edges array
+    const cachedEdges = loadCachedGraphEdges(db, otherRepoNames);
+    if (cachedEdges.length > 0) {
+      console.log(`  Loaded ${cachedEdges.length} cached graph edges from ${otherRepoNames.join(", ")}`);
+      // Add cached edges to the edges array for cross-service card generation
+      for (const ce of cachedEdges) {
+        edges.push({
+          sourceFile: ce.source_file,
+          targetFile: ce.target_file,
+          relation: ce.relation as GraphEdge["relation"],
+          metadata: JSON.parse(ce.metadata || "{}"),
+          repo: ce.repo,
+        });
+      }
+    }
+
+    // Load cached file index for other repos so flow detection can see them
+    const cachedFiles = loadCachedFileIndex(db, otherRepoNames);
+    if (cachedFiles.length > 0) {
+      console.log(`  Loaded ${cachedFiles.length} cached file entries from ${otherRepoNames.join(", ")}`);
+      for (const cf of cachedFiles) {
+        try {
+          const parsed = JSON.parse(cf.parsed_data || "{}");
+          allParsed.push({
+            path: join(workspaceRoot, cf.path),
+            repo: cf.repo,
+            language: "typescript",
+            fileRole: (cf.file_role || "domain") as ParsedFile["fileRole"],
+            classes: parsed.classes ?? [],
+            associations: parsed.associations ?? [],
+            functions: (parsed.functions ?? []).map((n: string) => ({ name: n, params: [], returnType: "" })),
+            imports: [],
+            exports: [],
+            routes: [],
+            apiCalls: [],
+            storeUsages: [],
+            callbacks: [],
+            validations: [],
+          });
+        } catch {
+          // skip malformed cached entries
+        }
+      }
+    }
+
+    console.log(`  Combined: ${edges.length} edges, ${allParsed.length} files\n`);
+  }
 
   // =========================================================================
   // Phase 1b — LLM-First Discovery (Opus)
@@ -664,9 +754,30 @@ export async function indexRepos(repos: RepoConfig[], workspaceRoot: string, opt
     console.log(`  LLM cost estimate: ~$${(inputCost + outputCost).toFixed(4)} (${estimatedTokens} tokens)`);
   }
 
-  db.prepare("DELETE FROM cards WHERE card_type IN ('auto_generated', 'flow', 'model', 'cross_service', 'hub')").run();
-  db.prepare("DELETE FROM card_embeddings").run();
-  try { db.prepare("DELETE FROM card_title_embeddings").run(); } catch { /* pre-v14 DB */ }
+  // Scoped card cleanup for incremental mode
+  if (isIncremental) {
+    const targetRepo = targetRepoNames[0]!;
+    // Delete target repo's flow/model/hub cards
+    db.prepare(
+      `DELETE FROM cards WHERE card_type IN ('auto_generated', 'flow', 'model', 'hub')
+       AND source_repos LIKE ?`,
+    ).run(`%${targetRepo}%`);
+    // Always delete all cross_service cards (they span repos and must be regenerated)
+    db.prepare("DELETE FROM cards WHERE card_type = 'cross_service'").run();
+    // Clean embeddings for deleted cards
+    db.prepare(
+      `DELETE FROM card_embeddings WHERE card_id NOT IN (SELECT id FROM cards)`,
+    ).run();
+    try {
+      db.prepare(
+        `DELETE FROM card_title_embeddings WHERE card_id NOT IN (SELECT id FROM cards)`,
+      ).run();
+    } catch { /* pre-v14 DB */ }
+  } else {
+    db.prepare("DELETE FROM cards WHERE card_type IN ('auto_generated', 'flow', 'model', 'cross_service', 'hub')").run();
+    db.prepare("DELETE FROM card_embeddings").run();
+    try { db.prepare("DELETE FROM card_title_embeddings").run(); } catch { /* pre-v14 DB */ }
+  }
 
   const insertCard = db.prepare(
     `INSERT INTO cards (id, flow, title, content, card_type, source_files, source_repos, tags, valid_branches, commit_sha, content_hash, identifiers)

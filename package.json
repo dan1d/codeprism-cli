@@ -24,12 +24,16 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/cli/codeprism.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.77.0",
     "@google/generative-ai": "^0.24.1",
     "@huggingface/transformers": "latest",
+    "@inquirer/prompts": "^8.3.0",
     "better-sqlite3": "latest",
     "commander": "^14.0.3",
     "glob": "latest",
@@ -54,8 +58,10 @@
   "devDependencies": {
     "@types/better-sqlite3": "latest",
     "@types/node": "latest",
+    "@vitest/coverage-v8": "^3.2.4",
     "tsx": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "vitest": "^3.2.4"
   },
   "engines": {
     "node": ">=18.0.0"

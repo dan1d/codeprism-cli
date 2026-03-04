@@ -38,18 +38,56 @@ export interface PushOptions {
   delete?: boolean;
 }
 
+/**
+ * Try to load engineUrl/apiKey from .codeprism/config.json
+ * Walks up from startDir looking for the config directory.
+ */
+function loadInitConfig(): { engineUrl?: string; apiKey?: string; foundAt?: string } {
+  let dir = process.cwd();
+  while (true) {
+    const cfgPath = join(dir, ".codeprism", "config.json");
+    if (existsSync(cfgPath)) {
+      try {
+        const raw = JSON.parse(readFileSync(cfgPath, "utf-8"));
+        return {
+          engineUrl: typeof raw.engineUrl === "string" ? raw.engineUrl : undefined,
+          apiKey: typeof raw.apiKey === "string" ? raw.apiKey : undefined,
+          foundAt: dir,
+        };
+      } catch {
+        return {};
+      }
+    }
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return {};
+}
+
 export async function runPush(opts: PushOptions): Promise<void> {
-  const engineUrl = opts.engineUrl.replace(/\/$/, "");
-  const apiKey = opts.apiKey;
+  // Auto-fill from .codeprism/config.json when flags/env are empty
+  const initConfig = (!opts.engineUrl || !opts.apiKey) ? loadInitConfig() : {};
+
+  if (initConfig.foundAt) {
+    const cwdIsWorkspace = resolve(process.cwd()) === resolve(initConfig.foundAt);
+    console.log(`[codeprism] Using config from: ${initConfig.foundAt}/.codeprism/config.json`);
+    if (!cwdIsWorkspace) {
+      console.log(`[codeprism] Hint: you're in ${process.cwd()} but the workspace is at ${initConfig.foundAt}`);
+    }
+  }
+
+  const engineUrl = (opts.engineUrl || initConfig.engineUrl || "").replace(/\/$/, "");
+  const apiKey = opts.apiKey || initConfig.apiKey || "";
   const dbPath = resolve(opts.db ?? defaultDbPath());
   const shouldDelete = opts.delete ?? false;
 
   if (!engineUrl) {
-    console.error("❌  --engine-url is required (or set CODEPRISM_ENGINE_URL)");
+    console.error("❌  --engine-url is required (or set CODEPRISM_ENGINE_URL, or run `codeprism init`)");
     process.exit(1);
   }
   if (!apiKey) {
-    console.error("❌  --api-key is required (or set CODEPRISM_API_KEY)");
+    console.error("❌  --api-key is required (or set CODEPRISM_API_KEY, or run `codeprism init`)");
     process.exit(1);
   }
   if (!existsSync(dbPath)) {
