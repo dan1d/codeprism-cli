@@ -17,6 +17,7 @@ import { join, resolve, basename, relative } from "node:path";
 import { homedir } from "node:os";
 import { checkbox, input, password, select, confirm } from "@inquirer/prompts";
 import { discoverRepos } from "../config/workspace-config.js";
+import { installHook, findGitRoot } from "./install-hook.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -449,7 +450,29 @@ export async function runInit(cwd: string): Promise<void> {
     console.log(`  ${mcpConfig.split("\n").join("\n  ")}\n`);
   }
 
-  // ── Step 5: LLM provider ─────────────────────────────────────────────
+  // ── Step 5: Git hooks ────────────────────────────────────────────────
+  const installHooks = await confirm({
+    message: "Install git hooks for automatic KB sync? (post-commit, post-merge, etc.)",
+    default: true,
+  });
+
+  if (installHooks) {
+    for (const repo of repos) {
+      const repoAbs = resolve(cwd, repo.path);
+      const gitRoot = findGitRoot(repoAbs);
+      if (!gitRoot) {
+        console.warn(`  ✗ ${repo.name} — not a git repository, skipping hooks`);
+        continue;
+      }
+      try {
+        await installHook(repoAbs, { base: "main", strict: false, engineUrl: cleanEngineUrl });
+      } catch (err) {
+        console.warn(`  ✗ ${repo.name} — hook install failed: ${(err as Error).message}`);
+      }
+    }
+  }
+
+  // ── Step 6: LLM provider ─────────────────────────────────────────────
   const llmProvider = await select({
     message: "LLM provider for indexing (uses your own API key):",
     choices: [
@@ -473,12 +496,12 @@ export async function runInit(cwd: string): Promise<void> {
     }
   }
 
-  // ── Step 6: Fetch team rules ─────────────────────────────────────────
+  // ── Step 7: Fetch team rules ─────────────────────────────────────────
   console.log("  Fetching team rules...");
   const rules = await fetchTeamRules(cleanEngineUrl, apiKey);
   console.log(`  ${rules.length} rule(s) cached.\n`);
 
-  // ── Step 7: Create .codeprism/ directory ─────────────────────────────
+  // ── Step 8: Create .codeprism/ directory ─────────────────────────────
   mkdirSync(configDir, { recursive: true });
 
   const config: CodeprismConfig = {

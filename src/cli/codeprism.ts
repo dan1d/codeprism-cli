@@ -24,9 +24,10 @@ import { installHook } from "./install-hook.js";
 import { runPush } from "./push.js";
 import { installRules } from "./install-rules.js";
 import { runInit } from "./init.js";
+import { runUninstall } from "./uninstall.js";
 
 const program = new Command("codeprism");
-program.version("0.1.0");
+program.version("0.2.1");
 
 // ---------------------------------------------------------------------------
 // codeprism init
@@ -274,6 +275,22 @@ program
   .option("--all", "install rules for all supported editors", false)
   .action(async (opts: { editor?: string; all: boolean }) => {
     await installRules(process.cwd(), opts);
+  });
+
+// ---------------------------------------------------------------------------
+// codeprism uninstall
+// ---------------------------------------------------------------------------
+
+program
+  .command("uninstall")
+  .description(
+    "Remove all codeprism artifacts from the workspace, repos, git hooks, and (optionally) global editor configs.",
+  )
+  .option("--force", "skip confirmation prompt", false)
+  .option("--no-global", "skip global editor configs (~/.claude, ~/.codeium, ~/.config/zed)")
+  .option("--dry-run", "list what would be removed without making changes", false)
+  .action(async (opts: { force: boolean; global: boolean; dryRun: boolean }) => {
+    await runUninstall({ force: opts.force, noGlobal: !opts.global, dryRun: opts.dryRun });
   });
 
 program.parse(process.argv);

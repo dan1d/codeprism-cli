@@ -1,6 +1,6 @@
 {
   "name": "codeprism",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Index your codebase locally and push AI knowledge cards to a codeprism engine",
   "license": "MIT",
   "type": "module",

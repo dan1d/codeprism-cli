@@ -23,7 +23,7 @@ interface HookOptions {
   engineUrl?: string;
 }
 
-function findGitRoot(cwd: string): string | null {
+export function findGitRoot(cwd: string): string | null {
   try {
     return execSync("git rev-parse --show-toplevel", {
       cwd,

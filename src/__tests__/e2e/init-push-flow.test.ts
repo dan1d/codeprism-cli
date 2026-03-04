@@ -130,6 +130,7 @@ function writeJson(filePath: string, value: unknown): void {
  *   if fetchDevEmail returns ""→ input: dev email
  *   if editors detected       → checkbox: install MCP for which editors?
  *   if NO editors detected    → select: install MCP for which editor? (skip)
+ *   always                    → confirm: "install git hooks?"
  *   always                    → select: LLM provider
  *
  * Because detectEditors() reads real home-dir paths at runtime we arm BOTH
@@ -170,6 +171,9 @@ function setupInitPrompts(overrides: {
 
   // No editors detected path → select "skip"
   mockSelect.mockResolvedValueOnce("skip" as never);
+
+  // Git hooks — default: skip (avoids needing real git repos)
+  mockConfirm.mockResolvedValueOnce(false as never);
 
   // LLM provider → skip
   mockSelect.mockResolvedValueOnce("skip" as never);
@@ -292,6 +296,41 @@ describe("Test 1b: runInit() with a single discovered repo", () => {
       ([arg]) => (arg as { message?: string }).message?.includes("Select repositories"),
     );
     expect(repoCheckboxCall).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Test 1c: runInit() prompts for git hooks during setup
+// ---------------------------------------------------------------------------
+
+describe("Test 1c: runInit() prompts for git hooks", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = makeTempDir();
+    makeGitRepo(tmpDir, "hook-test-repo");
+
+    fetchMock.mockRejectedValue(new Error("network error"));
+    setupInitPrompts({
+      engineUrl: "https://hook-test.codeprism.dev",
+      apiKey: "sk_hook_test",
+    });
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+    vi.clearAllMocks();
+    fetchMock.mockReset();
+  });
+
+  it("asks whether to install git hooks during init", async () => {
+    await runInit(tmpDir);
+
+    // Find the confirm call that mentions "git hooks"
+    const hookConfirmCall = mockConfirm.mock.calls.find(
+      ([arg]) => (arg as { message?: string }).message?.toLowerCase().includes("git hook"),
+    );
+    expect(hookConfirmCall).toBeDefined();
   });
 });
 

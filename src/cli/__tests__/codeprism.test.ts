@@ -37,7 +37,7 @@ describe("Commander command registration contract", () => {
     expect(names).toContain("init");
   });
 
-  it("registers 'index', 'push', 'rules', 'sync', 'check', 'install-hook', 'install-rules' and 'import-transcripts'", () => {
+  it("registers all expected commands including 'uninstall'", () => {
     // Arrange: mirror the registration from codeprism.ts
     const program = new Command("codeprism");
     const commandNames = [
@@ -51,6 +51,7 @@ describe("Commander command registration contract", () => {
       "sync",
       "install-hook",
       "install-rules",
+      "uninstall",
     ];
     for (const name of commandNames) {
       program.command(name).description(`${name} command`);
@@ -191,6 +192,24 @@ describe("Commander command registration contract", () => {
     expect(optionNames).toContain("--all");
   });
 
+  it("'uninstall' command has --force, --no-global, and --dry-run options", () => {
+    // Arrange
+    const program = new Command("codeprism");
+    const uninstallCmd = program
+      .command("uninstall")
+      .option("--force", "Skip confirmation", false)
+      .option("--no-global", "Skip global configs")
+      .option("--dry-run", "List only", false);
+
+    // Act
+    const optionNames = uninstallCmd.options.map((o) => o.long);
+
+    // Assert
+    expect(optionNames).toContain("--force");
+    expect(optionNames).toContain("--no-global");
+    expect(optionNames).toContain("--dry-run");
+  });
+
   it("program name is 'codeprism'", () => {
     // Arrange
     const program = new Command("codeprism");
@@ -221,6 +240,7 @@ describe("CLI program — smoke test", () => {
       "sync",
       "install-hook",
       "install-rules",
+      "uninstall",
     ];
     for (const name of commandNames) {
       program.command(name).description(`${name} description`);
