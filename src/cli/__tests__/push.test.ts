@@ -48,7 +48,7 @@ function writeInitConfig(dir: string, config: object): void {
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
-  vi.spyOn(process, "exit").mockImplementation((_code?: number | string) => {
+  vi.spyOn(process, "exit").mockImplementation((_code?: number | string | null) => {
     throw new Error(`process.exit(${_code})`);
   });
   vi.spyOn(console, "error").mockImplementation(() => undefined);

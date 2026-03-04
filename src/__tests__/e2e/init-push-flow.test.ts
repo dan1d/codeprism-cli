@@ -554,7 +554,7 @@ describe("Test 4: runInit() parent-config detection", () => {
 
     // Assert: select was called once with all three choices
     expect(mockSelect).toHaveBeenCalledOnce();
-    const choices = (mockSelect.mock.calls[0]![0] as {
+    const choices = (mockSelect.mock.calls[0]![0] as unknown as {
       choices: Array<{ value: string }>;
     }).choices;
     const values = choices.map((c) => c.value);
