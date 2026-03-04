@@ -3,8 +3,9 @@
 Index your codebase locally and push AI knowledge cards to a [codeprism](https://codeprism.dev) engine.
 
 ```bash
+npx codeprism init
 npx codeprism index
-npx codeprism push --engine-url https://yourteam.codeprism.dev --api-key sk_xxx --delete
+npx codeprism push
 ```
 
 ---
@@ -20,6 +21,16 @@ npx codeprism --help
 ---
 
 ## Commands
+
+### `codeprism init`
+
+Interactive setup wizard — configure repos, engine URL, API key, MCP editor config, git hooks, and LLM provider in one step.
+
+```bash
+codeprism init
+```
+
+Creates a `.codeprism/` directory with `config.json`, `rules.json`, and `.gitignore`. Optionally installs MCP configs for detected editors and git hooks for automatic KB sync.
 
 ### `codeprism index`
 
@@ -37,7 +48,9 @@ Options:
 - `--force` — reindex everything regardless of git changes
 - `--repo <name>` — restrict to a single repo
 - `--skip-docs` — skip doc generation (faster)
+- `--force-docs` — force regeneration of all docs even if they exist
 - `--ticket <id>` — bias indexing toward a ticket (e.g. `ENG-123`)
+- `--fetch-remote` — run `git fetch --all` before branch signal collection
 
 ### `codeprism push`
 
@@ -58,11 +71,43 @@ Options:
 
 ### `codeprism install-hook`
 
-Install git hooks in the current repo to sync file changes automatically after commits.
+Install git hooks in the current repo to sync file changes automatically after commits, merges, branch switches, and rebases.
 
 ```bash
 codeprism install-hook --engine-url https://yourteam.codeprism.dev
 ```
+
+Hooks installed: `post-commit`, `post-merge`, `post-checkout`, `post-rewrite`. Also offered during `codeprism init`.
+
+### `codeprism install-rules`
+
+Write AI rule files that instruct your editor to always consult codeprism before any task. Auto-detects Cursor, Claude Code, Windsurf, and Zed.
+
+```bash
+codeprism install-rules            # auto-detect editors
+codeprism install-rules --all      # install for all editors
+codeprism install-rules --editor cursor
+```
+
+### `codeprism uninstall`
+
+Remove all codeprism artifacts from the workspace, repos, git hooks, and (optionally) global editor configs.
+
+```bash
+codeprism uninstall              # interactive confirmation
+codeprism uninstall --dry-run    # preview what would be removed
+codeprism uninstall --force      # skip confirmation
+codeprism uninstall --no-global  # skip global editor configs
+```
+
+Removes:
+- `.codeprism/` directory, `codeprism.db`, `codeprism.config.json`
+- `ai-codeprism/` generated docs per repo
+- Editor rules (`.cursor/rules/codeprism.mdc`, `.zed/rules/codeprism.md`)
+- Codeprism sections from `CLAUDE.md`, `.windsurfrules`
+- `mcpServers.codeprism` from `.cursor/mcp.json`
+- Codeprism blocks from git hooks
+- Global configs (`~/.claude/`, `~/.codeium/windsurf/`, `~/.config/zed/`)
 
 ### `codeprism sync`
 
@@ -80,7 +125,7 @@ Manage team coding rules stored in the local engine DB.
 
 ## Workspace config
 
-Place `codeprism.config.json` at your workspace root to explicitly list repos:
+Run `codeprism init` to create `.codeprism/config.json` interactively, or place `codeprism.config.json` at your workspace root:
 
 ```json
 {
